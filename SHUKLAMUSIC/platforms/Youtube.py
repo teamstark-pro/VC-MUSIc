@@ -1,126 +1,279 @@
 # ---------------------------------------------------------------
-# 🔸 Shashank Saavn-API Project (Replaced)
-# 🔹 Originally by: Shashank Shukla
-# 📅 Updated: 2025
+# 🔸 Shashank YT-API Project
+# 🔹 Developed & Maintained by: Shashank Shukla (https://github.com/itzshukla)
+# 📅 Copyright © 2025 – All Rights Reserved
+#
+# 📖 License:
+# This source code is open for educational and non-commercial use ONLY.
+# You are required to retain this credit in all copies or substantial portions of this file.
+# Commercial use, redistribution, or removal of this notice is strictly prohibited
+# without prior written permission from the author.
+#
+# ❤️ Made with dedication and love by ItzShukla
 # ---------------------------------------------------------------
 
 import asyncio
 import os
-import aiohttp
-import logging
+import re
+import json
 from typing import Union
-from pyrogram.types import Message
+import requests
+import yt_dlp
 from pyrogram.enums import MessageEntityType
+from pyrogram.types import Message
+from py_yt import VideosSearch
+from ..utils.database import is_on_off
+from ..utils.formatters import time_to_seconds
+from SHUKLAMUSIC import app
+import random
+import logging
+import aiohttp
 from SHUKLAMUSIC import LOGGER
+from urllib.parse import urlparse
 
-# New API Endpoint
-API_BASE_URL = "https://saavnify.qzz.io/api/search/songs"
+API_BASE_URL = "https://riyabots.site"
+API_KEY = os.getenv("API_KEY", "")
 
-# Helper to format seconds to MM:SS
-def seconds_to_time(seconds):
-    m, s = divmod(seconds, 60)
-    return f"{m:02d}:{s:02d}"
+async def get_telegram_file(telegram_url: str, video_id: str, file_type: str) -> str:
+    logger = LOGGER("StrangerAPI/Youtube.py")
+    try:
+        extension = ".webm" if file_type == "audio" else ".mkv"
+        file_path = os.path.join("downloads", f"{video_id}{extension}")
 
-async def download_saavn_content(query: str, download_type: str = "audio") -> str:
-    """
-    Searches and downloads the song using Saavnify API.
-    """
-    logger = LOGGER("StrangerAPI/Saavn.py")
-    
-    # Clean query if it's a URL
-    if "http" in query:
-        # If it's a link, we might need to extract a query or handle it differently
-        # For now, we assume the user passes a song name or the API handles the link
-        pass
+        if os.path.exists(file_path):
+            logger.info(f"📂 [LOCAL] File exists: {video_id}")
+            return file_path
+
+        parsed = urlparse(telegram_url)
+        parts = parsed.path.strip("/").split("/")
+
+        if len(parts) < 2:
+            logger.error(f"❌ Invalid Telegram link format: {telegram_url}")
+            return None
+
+        channel_name = parts[0]
+        message_id = int(parts[1])
+
+        logger.info(f"📥 [TELEGRAM] Downloading from @{channel_name}/{message_id}")
+
+        msg = await app.get_messages(channel_name, message_id)
+
+        os.makedirs("downloads", exist_ok=True)
+        await msg.download(file_name=file_path)
+
+        timeout = 0
+        while not os.path.exists(file_path) and timeout < 60:
+            await asyncio.sleep(0.5)
+            timeout += 0.5
+
+        if os.path.exists(file_path):
+            logger.info(f"✅ [TELEGRAM] Downloaded: {video_id}")
+            return file_path
+        else:
+            logger.error(f"❌ [TELEGRAM] Timeout: {video_id}")
+            return None
+
+    except Exception as e:
+        logger.error(f"❌ [TELEGRAM] Failed to download {video_id}: {e}")
+        return None
+
+
+async def download_song(link: str) -> str:
+    video_id = link.split('v=')[-1].split('&')[0] if 'v=' in link else link
+    logger = LOGGER("StrangerAPI/Youtube.py")
+    logger.info(f"🎵 [AUDIO] Starting download for: {video_id}")
+
+    if not video_id or len(video_id) < 3:
+        logger.error(f"❌ [AUDIO] Invalid video ID: {video_id}")
+        return None
+
+    DOWNLOAD_DIR = "downloads"
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    file_path = os.path.join(DOWNLOAD_DIR, f"{video_id}.webm")
+
+    if os.path.exists(file_path):
+        logger.info(f"🎵 [LOCAL] File exists: {video_id}")
+        return file_path
 
     try:
         async with aiohttp.ClientSession() as session:
-            # 1. Search for the song
-            search_url = f"{API_BASE_URL}?query={query}"
-            async with session.get(search_url) as resp:
-                if resp.status != 200:
-                    logger.error(f"❌ API Error: {resp.status}")
+            url = f"{API_BASE_URL}/download/audio"
+            params = {
+                "video_id": video_id,
+                "api_key": API_KEY
+            }
+
+            logger.info(f"🔄 [AUDIO] Requesting from API: {video_id}")
+
+            async with session.get(
+                url,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+
+                if response.status != 200:
+                    logger.error(f"❌ [AUDIO] API error: {response.status}")
                     return None
-                data = await resp.json()
 
-            if not data.get("success") or not data.get("data") or not data["data"]["results"]:
-                logger.error("❌ No results found on Saavn.")
-                return None
+                data = await response.json()
+                logger.info(f"📦 [AUDIO] API Response: {data}")
 
-            # Get the first result
-            result = data["data"]["results"][0]
-            song_id = result["id"]
-            title = result["name"]
-            
-            # Get 320kbps download link (fallback to lower quality if not available)
-            download_urls = result.get("downloadUrl", [])
-            file_url = None
-            
-            # Try to find 320kbps, then 160kbps, then last available
-            for d in download_urls:
-                if d["quality"] == "320kbps":
-                    file_url = d["url"]
-                    break
-            if not file_url and download_urls:
-                file_url = download_urls[-1]["url"]
+                if data.get("telegram_url"):
+                    telegram_url = data["telegram_url"]
+                    status = data.get("status", "unknown")
 
-            if not file_url:
-                logger.error("❌ No download URL found in API response.")
-                return None
+                    logger.info(f"🔗 [AUDIO] Status: {status} | Telegram URL: {telegram_url}")
 
-            # 2. Download the file
-            DOWNLOAD_DIR = "downloads"
-            os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-            extension = "m4a" # Saavn usually sends m4a/mp4 audio
-            file_path = os.path.join(DOWNLOAD_DIR, f"{song_id}.{extension}")
+                    downloaded_file = await get_telegram_file(telegram_url, video_id, "audio")
 
-            if os.path.exists(file_path):
-                logger.info(f"📂 [LOCAL] File exists: {title}")
-                return file_path
-
-            logger.info(f"⬇️ Downloading: {title} from Saavn...")
-            async with session.get(file_url) as file_resp:
-                if file_resp.status == 200:
-                    with open(file_path, 'wb') as f:
-                        while True:
-                            chunk = await file_resp.content.read(1024)
-                            if not chunk:
-                                break
-                            f.write(chunk)
-                    logger.info(f"✅ Download Complete: {file_path}")
-                    return file_path
+                    if downloaded_file:
+                        logger.info(f"🎉 [AUDIO] Successfully downloaded: {video_id}")
+                        return downloaded_file
+                    else:
+                        logger.error(f"⚠️ [AUDIO] Telegram download failed for: {video_id}")
+                        return None
                 else:
-                    logger.error("❌ Failed to download file stream.")
+                    logger.error(f"❌ [AUDIO] No telegram_url in response: {data}")
                     return None
 
+    except asyncio.TimeoutError:
+        logger.error(f"⏱️ [AUDIO] Timeout: {video_id}")
+        return None
     except Exception as e:
-        logger.error(f"❌ Exception in download: {e}")
+        logger.error(f"❌ [AUDIO] Exception for {video_id}: {e}")
         return None
 
-# Wrapper functions to maintain compatibility with your bot's logic
-async def download_song(link: str) -> str:
-    return await download_saavn_content(link, "audio")
 
 async def download_video(link: str) -> str:
-    # Saavn is Audio only. We return the audio file even if video is requested.
-    # This prevents the bot from crashing.
-    return await download_saavn_content(link, "video") 
+    video_id = link.split('v=')[-1].split('&')[0] if 'v=' in link else link
+    logger = LOGGER("StrangerAPI/Youtube.py")
+    logger.info(f"🎥 [VIDEO] Starting download for: {video_id}")
+
+    if not video_id or len(video_id) < 3:
+        logger.error(f"❌ [VIDEO] Invalid video ID: {video_id}")
+        return None
+
+    DOWNLOAD_DIR = "downloads"
+    os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+    file_path = os.path.join(DOWNLOAD_DIR, f"{video_id}.mkv")
+
+    if os.path.exists(file_path):
+        logger.info(f"🎥 [LOCAL] File exists: {video_id}")
+        return file_path
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"{API_BASE_URL}/download/video"
+            params = {
+                "video_id": video_id,
+                "api_key": API_KEY
+            }
+
+            logger.info(f"🔄 [VIDEO] Requesting from API: {video_id}")
+
+            async with session.get(
+                url,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=60)
+            ) as response:
+
+                if response.status != 200:
+                    logger.error(f"❌ [VIDEO] API error: {response.status}")
+                    return None
+
+                data = await response.json()
+                logger.info(f"📦 [VIDEO] API Response: {data}")
+
+                if data.get("telegram_url"):
+                    telegram_url = data["telegram_url"]
+                    status = data.get("status", "unknown")
+
+                    logger.info(f"🔗 [VIDEO] Status: {status} | Telegram URL: {telegram_url}")
+
+                    downloaded_file = await get_telegram_file(telegram_url, video_id, "video")
+
+                    if downloaded_file:
+                        logger.info(f"🎉 [VIDEO] Successfully downloaded: {video_id}")
+                        return downloaded_file
+                    else:
+                        logger.error(f"⚠️ [VIDEO] Telegram download failed for: {video_id}")
+                        return None
+                else:
+                    logger.error(f"❌ [VIDEO] No telegram_url in response: {data}")
+                    return None
+
+    except asyncio.TimeoutError:
+        logger.error(f"⏱️ [VIDEO] Timeout: {video_id}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ [VIDEO] Exception for {video_id}: {e}")
+        return None
+
+
+async def check_file_size(link):
+    async def get_format_info(link):
+        proc = await asyncio.create_subprocess_exec(
+            "yt-dlp",
+            "-J",
+            link,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            print(f'Error:\n{stderr.decode()}')
+            return None
+        return json.loads(stdout.decode())
+
+    def parse_size(formats):
+        total_size = 0
+        for format in formats:
+            if 'filesize' in format:
+                total_size += format['filesize']
+        return total_size
+
+    info = await get_format_info(link)
+    if info is None:
+        return None
+
+    formats = info.get('formats', [])
+    if not formats:
+        print("No formats found.")
+        return None
+
+    total_size = parse_size(formats)
+    return total_size
+
+
+async def shell_cmd(cmd):
+    proc = await asyncio.create_subprocess_shell(
+        cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    out, errorz = await proc.communicate()
+    if errorz:
+        if "unavailable videos are hidden" in (errorz.decode("utf-8")).lower():
+            return out.decode("utf-8")
+        else:
+            return errorz.decode("utf-8")
+    return out.decode("utf-8")
+
 
 class YouTubeAPI:
-    """
-    Renamed logic to use Saavn, but Class name kept same 
-    to prevent breaking SHUKLAMUSIC imports.
-    """
     def __init__(self):
-        self.base = "https://www.jiosaavn.com/song/" # Just for regex checks if needed
-        self.regex = r"(?:jiosaavn\.com|saavn\.com)"
+        self.base = "https://www.youtube.com/watch?v="
+        self.regex = r"(?:youtube\.com|youtu\.be)"
+        self.status = "https://www.youtube.com/oembed?url="
+        self.listbase = "https://youtube.com/playlist?list="
+        self.reg = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
 
     async def exists(self, link: str, videoid: Union[bool, str] = None):
-        # Always return True to force search, or implement saavn regex
-        return True
+        if videoid:
+            link = self.base + link
+        return bool(re.search(self.regex, link))
 
     async def url(self, message_1: Message) -> Union[str, None]:
-        # Extracts URL or Text from message
         messages = [message_1]
         if message_1.reply_to_message:
             messages.append(message_1.reply_to_message)
@@ -130,103 +283,141 @@ class YouTubeAPI:
                     if entity.type == MessageEntityType.URL:
                         text = message.text or message.caption
                         return text[entity.offset: entity.offset + entity.length]
+            elif message.caption_entities:
+                for entity in message.caption_entities:
+                    if entity.type == MessageEntityType.TEXT_LINK:
+                        return entity.url
         return None
 
     async def details(self, link: str, videoid: Union[bool, str] = None):
-        """
-        Returns: Title, Duration(String), Duration(Seconds), Thumbnail, ID
-        """
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{API_BASE_URL}?query={link}") as resp:
-                    data = await resp.json()
-                    
-            if data["success"] and data["data"]["results"]:
-                res = data["data"]["results"][0]
-                title = res["name"]
-                duration_sec = int(res["duration"])
-                duration_min = seconds_to_time(duration_sec)
-                vidid = res["id"]
-                # Get highest quality image
-                thumbnail = res["image"][-1]["url"] if res["image"] else ""
-                
-                return title, duration_min, duration_sec, thumbnail, vidid
-            return None, "00:00", 0, "", ""
-        except Exception:
-            return None, "00:00", 0, "", ""
+        if videoid:
+            link = self.base + link
+        if "&" in link:
+            link = link.split("&")[0]
+        results = VideosSearch(link, limit=1)
+        for result in (await results.next())["result"]:
+            title = result["title"]
+            duration_min = result["duration"]
+            thumbnail = result["thumbnails"][0]["url"].split("?")[0]
+            vidid = result["id"]
+            duration_sec = int(time_to_seconds(duration_min)) if duration_min else 0
+        return title, duration_min, duration_sec, thumbnail, vidid
 
     async def title(self, link: str, videoid: Union[bool, str] = None):
-        t, _, _, _, _ = await self.details(link)
-        return t
+        if videoid:
+            link = self.base + link
+        if "&" in link:
+            link = link.split("&")[0]
+        results = VideosSearch(link, limit=1)
+        for result in (await results.next())["result"]:
+            return result["title"]
 
     async def duration(self, link: str, videoid: Union[bool, str] = None):
-        _, d, _, _, _ = await self.details(link)
-        return d
+        if videoid:
+            link = self.base + link
+        if "&" in link:
+            link = link.split("&")[0]
+        results = VideosSearch(link, limit=1)
+        for result in (await results.next())["result"]:
+            return result["duration"]
 
     async def thumbnail(self, link: str, videoid: Union[bool, str] = None):
-        _, _, _, t, _ = await self.details(link)
-        return t
+        if videoid:
+            link = self.base + link
+        if "&" in link:
+            link = link.split("&")[0]
+        results = VideosSearch(link, limit=1)
+        for result in (await results.next())["result"]:
+            return result["thumbnails"][0]["url"].split("?")[0]
 
     async def video(self, link: str, videoid: Union[bool, str] = None):
-        # Maps to download_song because Saavn has no video
+        if videoid:
+            link = self.base + link
+        if "&" in link:
+            link = link.split("&")[0]
         try:
-            downloaded_file = await download_song(link)
+            downloaded_file = await download_video(link)
             if downloaded_file:
                 return 1, downloaded_file
-            return 0, "Download failed"
+            else:
+                return 0, "Video download failed"
         except Exception as e:
-            return 0, f"Error: {e}"
+            return 0, f"Video download error: {e}"
+
+    async def playlist(self, link, limit, user_id, videoid: Union[bool, str] = None):
+        if videoid:
+            link = self.listbase + link
+        if "&" in link:
+            link = link.split("&")[0]
+        playlist = await shell_cmd(
+            f"yt-dlp -i --get-id --flat-playlist --playlist-end {limit} --skip-download {link}"
+        )
+        try:
+            result = [key for key in playlist.split("\n") if key]
+        except:
+            result = []
+        return result
 
     async def track(self, link: str, videoid: Union[bool, str] = None):
-        """
-        Returns track_details dict and vidid
-        """
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{API_BASE_URL}?query={link}") as resp:
-                    data = await resp.json()
-
-            if data["success"] and data["data"]["results"]:
-                res = data["data"]["results"][0]
-                
-                track_details = {
-                    "title": res["name"],
-                    "link": res["url"],
-                    "vidid": res["id"],
-                    "duration_min": seconds_to_time(res["duration"]),
-                    "thumb": res["image"][-1]["url"] if res["image"] else "",
-                }
-                return track_details, res["id"]
-            return None, None
-        except Exception:
-            return None, None
+        if videoid:
+            link = self.base + link
+        if "&" in link:
+            link = link.split("&")[0]
+        results = VideosSearch(link, limit=1)
+        for result in (await results.next())["result"]:
+            title = result["title"]
+            duration_min = result["duration"]
+            vidid = result["id"]
+            yturl = result["link"]
+            thumbnail = result["thumbnails"][0]["url"].split("?")[0]
+        track_details = {
+            "title": title,
+            "link": yturl,
+            "vidid": vidid,
+            "duration_min": duration_min,
+            "thumb": thumbnail,
+        }
+        return track_details, vidid
 
     async def formats(self, link: str, videoid: Union[bool, str] = None):
-        # Saavn doesn't return formats like Yt-Dlp. 
-        # We return a dummy list to satisfy the bot's expectations.
-        return [{"format": "320kbps", "filesize": 0, "ext": "m4a"}], link
+        if videoid:
+            link = self.base + link
+        if "&" in link:
+            link = link.split("&")[0]
+        ytdl_opts = {"quiet": True}
+        ydl = yt_dlp.YoutubeDL(ytdl_opts)
+        with ydl:
+            formats_available = []
+            r = ydl.extract_info(link, download=False)
+            for format in r["formats"]:
+                try:
+                    if "dash" not in str(format["format"]).lower():
+                        formats_available.append(
+                            {
+                                "format": format["format"],
+                                "filesize": format.get("filesize"),
+                                "format_id": format["format_id"],
+                                "ext": format["ext"],
+                                "format_note": format["format_note"],
+                                "yturl": link,
+                            }
+                        )
+                except:
+                    continue
+        return formats_available, link
 
     async def slider(self, link: str, query_type: int, videoid: Union[bool, str] = None):
-        # Fetch results and pick the one at index 'query_type'
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{API_BASE_URL}?query={link}") as resp:
-                    data = await resp.json()
-
-            if data["success"] and data["data"]["results"]:
-                # Ensure index exists
-                idx = query_type if query_type < len(data["data"]["results"]) else 0
-                res = data["data"]["results"][idx]
-                
-                return (
-                    res["name"],
-                    seconds_to_time(res["duration"]),
-                    res["image"][-1]["url"],
-                    res["id"]
-                )
-            return None, None, None, None
-        except:
-            return None, None, None, None
+        if videoid:
+            link = self.base + link
+        if "&" in link:
+            link = link.split("&")[0]
+        a = VideosSearch(link, limit=10)
+        result = (await a.next()).get("result")
+        title = result[query_type]["title"]
+        duration_min = result[query_type]["duration"]
+        vidid = result[query_type]["id"]
+        thumbnail = result[query_type]["thumbnails"][0]["url"].split("?")[0]
+        return title, duration_min, thumbnail, vidid
 
     async def download(
         self,
@@ -239,15 +430,24 @@ class YouTubeAPI:
         format_id: Union[bool, str] = None,
         title: Union[bool, str] = None,
     ) -> str:
-        # Unified download method
+        if videoid:
+            link = self.base + link
+
         try:
-            # We ignore 'video' boolean because Saavn is audio-only.
-            # We just download the song.
-            downloaded_file = await download_song(link)
-            
-            if downloaded_file:
-                return downloaded_file, True
+            if video:
+                downloaded_file = await download_video(link)
+                if downloaded_file:
+                    return downloaded_file, True
+                else:
+                    return None, False
             else:
-                return None, False
+                downloaded_file = await download_song(link)
+                if downloaded_file:
+                    return downloaded_file, True
+                else:
+                    return None, False
+
         except Exception as e:
+            logger = LOGGER("StrangerAPI/Youtube.py")
+            logger.error(f"❌ Download failed: {e}")
             return None, False
